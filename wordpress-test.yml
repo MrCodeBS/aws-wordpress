@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "AWS CloudFormation template for WordPress on EC2 and RDS for testing."
+
+Parameters:
+  KeyName:
+    Description: "Name of an existing EC2 KeyPair for SSH access"
+    Type: "AWS::EC2::KeyPair::KeyName"
+    ConstraintDescription: "Must be the name of an existing EC2 KeyPair."
+
+  InstanceType:
+    Description: "EC2 instance type"
+    Type: "String"
+    Default: "t2.micro"
+    AllowedValues: [ "t2.micro", "t2.small", "t2.medium" ]
+    ConstraintDescription: "Must be a valid EC2 instance type."
+
+  DBUsername:
+    Description: "Database admin account username"
+    Type: "String"
+    MinLength: "1"
+    MaxLength: "16"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: "Must begin with a letter and contain only alphanumeric characters."
+
+  DBPassword:
+    Description: "Database admin account password"
+    Type: "String"
+    NoEcho: true
+    MinLength: "8"
+    MaxLength: "41"
+    AllowedPattern: "[a-zA-Z0-9]*"
+    ConstraintDescription: "Must contain only alphanumeric characters."
+
+Resources:
+  # Security Group for EC2 instance
+  EC2InstanceSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties: 
+      GroupDescription: "Enable HTTP access and SSH access"
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: "0.0.0.0/0"
+        - IpProtocol: "tcp"
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: "0.0.0.0/0"
+
+  # Security Group for RDS instance
+  RDSSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties: 
+      GroupDescription: "Enable MySQL access"
+      SecurityGroupIngress:
+        - IpProtocol: "tcp"
+          FromPort: "3306"
+          ToPort: "3306"
+          CidrIp: "0.0.0.0/0"
+
+  # RDS Database Instance
+  MySQLDatabase:
+    Type: "AWS::RDS::DBInstance"
+    Properties: 
+      DBName: "wordpress"
+      AllocatedStorage: "20"
+      DBInstanceClass: "db.t2.micro"
+      Engine: "MySQL"
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      VPCSecurityGroups: 
+        - !GetAtt RDSSecurityGroup.GroupId
+      BackupRetentionPeriod: "0"
+
+  # EC2 Instance for WordPress
+  WebServerInstance:
+    Type: "AWS::EC2::Instance"
+    Properties: 
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      SecurityGroupIds: 
+        - !GetAtt EC2InstanceSecurityGroup.GroupId
+      ImageId: "ami-0c55b159cbfafe1f0" # Amazon Linux 2 AMI
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          yum update -y
+          amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
+          yum install -y httpd mariadb-server
+          systemctl start httpd
+          systemctl enable httpd
+          systemctl start mariadb
+          systemctl enable mariadb
+          echo "<?php phpinfo(); ?>" > /var/www/html/index.php
+
+          # Download WordPress
+          wget https://wordpress.org/latest.tar.gz
+          tar -xzf latest.tar.gz
+          cp -r wordpress/* /var/www/html/
+          chown -R apache:apache /var/www/html/
+          chmod -R 755 /var/www/html/
+          rm -rf wordpress latest.tar.gz
+
+          # Configure WordPress
+          cat <<EOF > /var/www/html/wp-config.php
+          <?php
+          define('DB_NAME', 'wordpress');
+          define('DB_USER', '${DBUsername}');
+          define('DB_PASSWORD', '${DBPassword}');
+          define('DB_HOST', '${MySQLDatabase.Endpoint.Address}');
+          define('DB_CHARSET', 'utf8');
+          define('DB_COLLATE', '');
+          define('AUTH_KEY',         'put your unique phrase here');
+          define('SECURE_AUTH_KEY',  'put your unique phrase here');
+          define('LOGGED_IN_KEY',    'put your unique phrase here');
+          define('NONCE_KEY',        'put your unique phrase here');
+          define('AUTH_SALT',        'put your unique phrase here');
+          define('SECURE_AUTH_SALT', 'put your unique phrase here');
+          define('LOGGED_IN_SALT',   'put your unique phrase here');
+          define('NONCE_SALT',       'put your unique phrase here');
+          \$table_prefix = 'wp_';
+          define('WP_DEBUG', false);
+          if ( !defined('ABSPATH') )
+            define('ABSPATH', dirname(__FILE__) . '/');
+          require_once(ABSPATH . 'wp-settings.php');
+          EOF
+
+Outputs:
+  WebsiteURL:
+    Description: "WordPress Website URL"
+    Value: !Sub "http://${WebServerInstance.PublicDnsName}/wp-admin/install.php"
+
